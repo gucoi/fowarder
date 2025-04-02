@@ -1,6 +1,7 @@
 use futures::{future::Join, io};
 use thiserror::Error;
 use tokio::task::JoinError;
+use std::fmt;
 
 #[derive(Error, Debug)]
 pub enum ForwarderError {
@@ -93,4 +94,31 @@ impl From<serde_yaml::Error> for ForwarderError {
     }
 }
 
+impl From<zmq::Error> for ForwarderError {
+    fn from(err: zmq::Error) -> Self {
+        ForwarderError::Network(err.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, ForwarderError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_error_display() {
+        let err = ForwarderError::Config("invalid queue size".to_string());
+        assert_eq!(err.to_string(), "Configuration error: invalid queue size");
+    }
+
+    #[test]
+    fn test_error_conversion() {
+        let io_err = io::Error::new(io::ErrorKind::NotFound, "file not found");
+        let err: ForwarderError = io_err.into();
+        match err {
+            ForwarderError::Io(_) => assert!(true),
+            _ => assert!(false, "Expected Io error variant"),
+        }
+    }
+}

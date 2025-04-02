@@ -6,11 +6,14 @@ mod protocol;
 mod platform;
 
 use clap::Parser;
+use num_cpus;
 use cli::{Args, Config, ForwarderConfig};
 use error::Result;
 use capture::{interface::InterfaceManager, packet::PacketCapture, packet::PacketFilter};
 use forwarder::{base::PacketForwarder, GreForwarder};
 use log::error;
+use tokio::sync::broadcast;
+use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -34,21 +37,35 @@ async fn main() -> Result<()> {
         interface_manager.set_promiscuous(true)?;
     }
     
-    // 创建通道
-    let (tx, mut rx) = tokio::sync::mpsc::channel(config.forwarder.queue_size);
+    // 使用 broadcast channel 替代 mpsc
+    let (tx, _) = broadcast::channel(config.forwarder.queue_size * 2);
+    let packet_tx = tx.clone();
     
     // 创建数据包捕获器
     let mut packet_capture = PacketCapture::new(
         &interface_manager.get_interface().name,
-        tx,
+        packet_tx,
         PacketFilter::default(),
     )?;
     
-    // 创建转发器
-    let mut forwarder = create_forwarder(&config.forwarder).await?;
+    // 将配置包装在 Arc 中以便共享
+    let forwarder_config = Arc::new(config.forwarder);
     
-    // 初始化转发器
-    forwarder.init().await?;
+    // 使用固定的线程数
+    let worker_threads = num_cpus::get();
+    let mut forward_handles = Vec::new();
+    for _ in 0..worker_threads {
+        let mut forwarder = create_forwarder(&forwarder_config).await?;
+        let mut rx = tx.subscribe();
+        let config = Arc::clone(&forwarder_config);
+        forward_handles.push(tokio::spawn(async move {
+            while let Ok(packet) = rx.recv().await {
+                if let Err(e) = forwarder.forward_packet(&packet, &config).await {
+                    error!("Forwarding error: {}", e);
+                }
+            }
+        }));
+    }
     
     // 启动捕获任务
     let capture_handle = tokio::spawn(async move {
@@ -57,17 +74,16 @@ async fn main() -> Result<()> {
         }
     });
     
-    // 启动转发任务
-    let forward_handle = tokio::spawn(async move {
-        while let Some(ref packet) = rx.recv().await {
-            if let Err(e) = forwarder.forward_packet(packet, &config.forwarder).await {
-                error!("Packet forwarding error: {}", e);
-            }
-        }
-    });
+    // 等待所有任务完成
+    let forward_results = futures::future::join_all(forward_handles).await;
+    capture_handle.await?;
     
-    // 等待任务完成
-    tokio::try_join!(capture_handle, forward_handle)?;
+    // 检查转发任务的结果
+    for result in forward_results {
+        if let Err(e) = result {
+            error!("Forwarding task error: {}", e);
+        }
+    }
     
     Ok(())
 }

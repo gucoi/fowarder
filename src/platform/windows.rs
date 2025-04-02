@@ -15,16 +15,16 @@ impl WindowsInterface {
 }
 
 impl NetworkInterface for WindowsInterface {
-    fn bind_to_interface(&self, sock: socket2::Socket, interface_name: &str) -> crate::error::Result<()> {
+    fn bind_to_interface(&self, sock: &socket2::Socket, interface_name: &str) -> crate::error::Result<()> {
         let index = self.get_interface_index(interface_name)?;
         let raw_socket = sock.as_raw_socket();
         unsafe {
             let index_net = u32::to_be(index);
             let result = setsockopt(
-                SOCKET(raw_socket as usize),  // 转换为 SOCKET 类型
+                SOCKET(raw_socket as usize),
                 IPPROTO_IP.0,
                 IP_UNICAST_IF as i32,
-                Some(&index_net.to_ne_bytes()),  // 正确的类型转换
+                Some(&index_net.to_ne_bytes()),
             );
             if result == 0 {
                 Ok(())

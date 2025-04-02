@@ -1,6 +1,9 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::error::Result;
 use super::common::{Protocol, ProtocolType, Header};
+use crate::capture::PacketCapture;
+use crate::capture::packet::PacketInfo;
+use std::time::SystemTime;
 
 /// VXLAN头部标志位
 #[derive(Debug, Clone, Copy, Default)]
@@ -100,20 +103,51 @@ pub struct VxlanEndpoint {
 #[derive(Debug, Clone)]
 pub struct VxlanPacketBuilder {
     pub header : VxlanHeader,
-    pub payload: Option<Bytes>,
 }
 
 impl VxlanPacketBuilder {
     pub fn new() -> Self {
         Self {
             header: VxlanHeader::default(),
-            payload: None,
         }
+    }
+
+    pub fn build(&mut self, packet: &PacketInfo) -> Result<Bytes> {
+        // 创建缓冲区存储完整的VXLAN数据包
+        let mut buf = BytesMut::with_capacity(self.header.header_len());
+
+        // 设置VNI和标志
+        self.header.flags.vni_present = true;
+        self.header.vni = packet.vni.unwrap_or(0);
+
+        // 写入VXLAN头部
+        self.header.write_to(&mut buf)?;
+
+        // 使用PacketCapture::build_packet构建原始数据包
+        let packet_data = PacketCapture::build_packet(packet);
+        buf.extend_from_slice(&packet_data);
+
+        Ok(buf.freeze())
+    }
+
+    pub fn set_vni(&mut self, vni: u32) -> &mut Self {
+        self.header.vni = vni;
+        self.header.flags.vni_present = true;
+        self
+    }
+
+    pub fn set_endpoint(&mut self, endpoint: &VxlanEndpoint) -> &mut Self {
+        self.header.vni = endpoint.vni;
+        self.header.flags.vni_present = true;
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use core::time;
+    use std::net::Ipv4Addr;
+
     use super::*;
     
     #[test]
@@ -122,7 +156,7 @@ mod tests {
             vni_present: true,
             reserved: 0,
         };
-        
+            
         let bits = flags.to_bits();
         let parsed = VxlanFlags::from_bits(bits);
         
@@ -142,11 +176,43 @@ mod tests {
         
         let mut buf = BytesMut::new();
         header.write_to(&mut buf).unwrap();
-        
+           
         let mut bytes = buf.freeze();
         let parsed = VxlanHeader::read_from(&mut bytes).unwrap();
         
         assert_eq!(parsed.flags.vni_present, header.flags.vni_present);
         assert_eq!(parsed.vni, header.vni);
+    }
+
+    #[test]
+    fn test_vxlan_packet_build() {
+        let mut builder = VxlanPacketBuilder::new();
+        let test_data = vec![1, 2, 3, 4];
+        let packet = PacketInfo {
+            pay_load: Some(Bytes::from(test_data.clone())),
+            vni: Some(1234),
+            src_port:None,
+            dst_port:None,
+            interface_name: String::new(),
+            raw_data: Bytes::from(vec![0; 0]), // Placeholder for raw data
+            source: Ipv4Addr::new(127, 0, 0, 1),
+            destination: Ipv4Addr::new(127, 0, 0, 1),
+            protocol: ProtocolType::Vxlan,
+            timestamp: SystemTime::now(),
+            length: 0,
+        };
+
+        let result = builder.build(&packet).unwrap();
+        
+        // 验证长度
+        assert_eq!(result.len(), 8 + test_data.len()); // VXLAN header + payload
+        
+        // 验证VNI
+        let mut bytes = result.slice(0..);
+        let parsed = VxlanHeader::read_from(&mut bytes).unwrap();
+        assert_eq!(parsed.vni, 1234);
+        
+        // 验证payload
+        assert_eq!(&bytes[..], &test_data[..]);
     }
 }

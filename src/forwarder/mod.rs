@@ -10,6 +10,7 @@ pub mod zmq;
 
 pub use base::PacketForwarder;
 pub use gre::GreForwarder;
+pub use vxlan::VxlanForwarder;
 
 use crate::error::Result;
 use crate::cli::ForwarderConfig;
@@ -90,7 +91,7 @@ mod tests {
             destination: "127.0.0.1".to_string(),
             max_packet_size: 1500,
             queue_size: 1000,
-            port: 9566,
+            port: Some(9566),
             bind_device: None,
         };
 

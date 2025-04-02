@@ -1,8 +1,6 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use pcap::Packet;
 use std::net::Ipv4Addr;
 use crate::capture::{PacketCapture, PacketInfo};
-use crate::cli::Config;
 use crate::error::Result;
 use super::common::{Protocol, ProtocolType, Header};
 use super::ipv4::Ipv4Header;
@@ -272,19 +270,29 @@ impl GrePacketBuilder {
 
     /// 构建GRE数据包
     pub fn build(&mut self, packet: &PacketInfo) -> Result<Bytes> {
-        let mut buf = BytesMut::new();
-
+        // 预分配足够大小的buffer,避免重新分配
+        let total_len = self.header.header_len() + packet.payload.len();
+        let mut buf = BytesMut::with_capacity(total_len);
+        
         // 1. 写入GRE头部
         self.header.write_to(&mut buf)?;
 
         // 2. 重新构建新的包
-        buf.put_slice(&PacketCapture::build_packet(&packet));
+        buf.extend_from_slice(&PacketCapture::build_packet(&packet));
 
         // 4. 如果需要计算校验和
         if self.compute_checksum {
             let checksum = self.calculate_checksum(&buf);
             // 在GRE头部之后写入校验和
             buf[4..6].copy_from_slice(&checksum.to_be_bytes());
+        }
+
+        // 添加错误处理
+        if buf.len() > packet.header.length as usize {
+            return Err(ForwarderError::PacketTooLarge {
+                size: buf.len(),
+                max: packet.header.length as usize,
+            });
         }
 
         Ok(buf.freeze())

@@ -11,11 +11,10 @@ impl LinuxInterface {
 }
 
 impl NetworkInterface for LinuxInterface {
-    fn bind_to_interface(&self, socket: socket2::Socket, interface_name: &str) -> crate::error::Result<()> {
+    fn bind_to_interface(&self, socket: &socket2::Socket, interface_name: &str) -> crate::error::Result<()> {
         #[cfg(target_os = "linux")]
         unsafe {
             let fd = socket.as_raw_fd();
-            let index = self.get_interface_index(interface_name)?;
             if libc::setsockopt(
                 fd,
                 libc::SOL_SOCKET,

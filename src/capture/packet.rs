@@ -4,31 +4,60 @@ use pnet::packet::ethernet::{EtherTypes, EthernetPacket};
 use pnet::packet::ipv4::Ipv4Packet;
 use pnet::packet::tcp::TcpPacket;
 use pnet::packet::udp::UdpPacket;
-use pnet::packet::{self, Packet};
+use pnet::packet::Packet;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::SystemTime;
 use std::sync::Arc;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, broadcast};
 
 use crate::error::{ForwarderError, Result};
+use crate::protocol::common::ProtocolType;
 
-/// 扩展的数据包信息结构
-#[derive(Clone)]
+/// 优化的数据包信息结构
+#[derive(Clone, Debug)]
 pub struct PacketInfo {
-    pub raw_data: Bytes,
-    pub timestamp: SystemTime,
-    pub source: Ipv4Addr,
-    pub destination: Ipv4Addr,
-    pub protocol: u8,
-    pub length: usize,
-    pub src_port: Option<u16>,
-    pub dst_port: Option<u16>,
-    pub interface_name: String,
-    pub pay_load: Option<Bytes>,
+    // 使用 Arc<Bytes> 替代 Option<Bytes> 来共享数据
+    pub payload: Arc<Bytes>,
+    // 内联小的头部数据以减少内存分配
+    pub header: PacketHeader,
+    // 使用 Option<NonZeroU32> 优化 Option 存储
+    pub vni: Option<std::num::NonZeroU32>,
 }
 
-/// 抓包过滤器
+#[derive(Clone, Debug)]
+pub struct PacketHeader {
+    pub source: Ipv4Addr,
+    pub destination: Ipv4Addr,
+    pub protocol: ProtocolType,
+    pub src_port: Option<u16>, 
+    pub dst_port: Option<u16>, 
+    pub length: u16,
+}
+
+impl Default for PacketInfo {
+    fn default() -> Self {
+        Self {
+            payload: Arc::new(Bytes::new()),
+            header: PacketHeader::default(),
+            vni: None,
+        }
+    }
+}
+
+impl Default for PacketHeader {
+    fn default() -> Self {
+        Self {
+            source: Ipv4Addr::new(0, 0, 0, 0),
+            destination: Ipv4Addr::new(0, 0, 0, 0),
+            protocol: ProtocolType::Ethernet,
+            src_port: None,
+            dst_port: None,
+            length: 0,
+        }
+    }
+}
+
+/// 抓包过滤器 - 只保留必要的过滤配置
 #[derive(Clone)]
 pub struct PacketFilter {
     pub bpf_filter: String,
@@ -50,7 +79,7 @@ impl Default for PacketFilter {
 
 pub struct PacketCapture {
     cap: Capture<Active>,
-    tx: mpsc::Sender<PacketInfo>,
+    tx: broadcast::Sender<PacketInfo>,  // 这里保持不变
     interface_name: String,
     stats: Arc<CaptureStats>,
 }
@@ -85,7 +114,7 @@ impl PacketCapture {
     /// 创建新的抓包实例
     pub fn new(
         interface_name: &str,
-        tx: mpsc::Sender<PacketInfo>,
+        tx: broadcast::Sender<PacketInfo>, // 保持参数不变
         filter: PacketFilter,
     ) -> Result<Self> {
         // 查找网络接口
@@ -121,22 +150,17 @@ impl PacketCapture {
     }
 
     pub async fn capture_loop(&mut self) -> Result<()> {
-        // 先获取我们需要的引用
-        let tx = &self.tx; // 只需要共享引用
-        let stats = &self.stats; // 使用原子操作的统计信息
+        let stats = &self.stats;
         let interface_name = &self.interface_name;
 
         loop {
-            // 这里只借用 self.cap
             match self.cap.next_packet() {
                 Ok(packet) => {
-                    // 使用原子操作更新统计
                     stats.packets_received.fetch_add(1, Ordering::Relaxed);
-
+                    // 移除生命周期标注
                     if let Some(packet_info) = Self::process_packet(&packet, interface_name) {
-                        // 使用之前获取的引用
-                        if let Err(e) = tx.send(packet_info).await {
-                            log::error!("Failed to send packet: {}", e);
+                        if let Err(e) = self.tx.send(packet_info) {
+                            log::error!("Failed to broadcast packet: {}", e);
                             break;
                         }
                     }
@@ -165,16 +189,18 @@ impl PacketCapture {
     }
     /// 启动抓包循环
     /// 处理捕获的数据包
+    // 简化函数签名，移除生命周期参数
     fn process_packet(packet: &pcap::Packet, interface_name: &str) -> Option<PacketInfo> {
         let ethernet = EthernetPacket::new(packet.data)?;
+
+        // 使用 zero-copy 方式处理 payload
+        let payload = Arc::new(Bytes::copy_from_slice(packet.data));
 
         match ethernet.get_ethertype() {
             EtherTypes::Ipv4 => {
                 let ip_packet = Ipv4Packet::new(ethernet.payload())?;
                 let mut src_port = None;
                 let mut dst_port = None;
-                let mut pay_load= None;
-
 
                 // 解析TCP/UDP端口
                 match ip_packet.get_next_level_protocol().0 {
@@ -183,7 +209,6 @@ impl PacketCapture {
                         if let Some(tcp) = TcpPacket::new(ip_packet.payload()) {
                             src_port = Some(tcp.get_source());
                             dst_port = Some(tcp.get_destination());
-                            pay_load = Some(Bytes::copy_from_slice(tcp.payload()));
                         }
                     }
                     17 => {
@@ -191,23 +216,22 @@ impl PacketCapture {
                         if let Some(udp) = UdpPacket::new(ip_packet.payload()) {
                             src_port = Some(udp.get_source());
                             dst_port = Some(udp.get_destination());
-                            pay_load = Some(Bytes::copy_from_slice(udp.payload()));
                         }
                     }
                     _ => {}
                 }
 
                 Some(PacketInfo {
-                    raw_data: Bytes::copy_from_slice(packet.data),
-                    timestamp: SystemTime::now(),
-                    source: ip_packet.get_source(),
-                    destination: ip_packet.get_destination(),
-                    protocol: ip_packet.get_next_level_protocol().0,
-                    length: packet.data.len(),
-                    src_port,
-                    dst_port,
-                    interface_name: interface_name.to_string(),
-                    pay_load: pay_load,
+                    payload,
+                    header: PacketHeader {
+                        source: ip_packet.get_source(),
+                        destination: ip_packet.get_destination(),
+                        protocol: ProtocolType::try_from(ip_packet.get_next_level_protocol().0).unwrap(),
+                        src_port,
+                        dst_port,
+                        length: packet.data.len() as u16,
+                    },
+                    vni: None,  // Default to None for now
                 })
             }
             _ => None,
@@ -216,18 +240,18 @@ impl PacketCapture {
 
     pub fn build_packet(packet_info: &PacketInfo) -> BytesMut {
         let mut buf = BytesMut::new();
-        buf.put_slice(&packet_info.raw_data[..14]);
+        buf.put_slice(&packet_info.payload.as_ref()[..14]);
 
         let mut ip_header = Vec::new();
-        ip_header.extend_from_slice(&packet_info.raw_data[14..34]);
+        ip_header.extend_from_slice(&packet_info.payload.as_ref()[14..34]);
 
-        let src_ip_ocs = packet_info.source.octets();
+        let src_ip_ocs = packet_info.header.source.octets();
         ip_header[12] = src_ip_ocs[0];
         ip_header[13] = src_ip_ocs[1];
         ip_header[14] = src_ip_ocs[2];
         ip_header[15] = src_ip_ocs[3];
 
-        let dst_ip_ocs = packet_info.destination.octets();
+        let dst_ip_ocs = packet_info.header.destination.octets();
         ip_header[16] = dst_ip_ocs[0];
         ip_header[17] = dst_ip_ocs[1];
         ip_header[18] = dst_ip_ocs[2];
@@ -235,7 +259,7 @@ impl PacketCapture {
 
         buf.put_slice(&ip_header);
 
-        buf.put_slice(&packet_info.raw_data[34..]);
+        buf.put_slice(&packet_info.payload.as_ref()[34..]);
 
         buf
     }
@@ -261,28 +285,28 @@ pub fn list_interfaces() -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
+    use tokio::sync::broadcast;
 
     #[tokio::test]
     async fn test_packet_capture() {
-        // 创建通道
-        let (tx, mut rx) = mpsc::channel(1000);
-
+        // 创建 broadcast channel
+        let (tx, _) = broadcast::channel(1000);
+        
         // 使用本地回环接口进行测试
         let filter = PacketFilter {
             bpf_filter: "tcp".to_string(),
             ..Default::default()
         };
 
-        // 创建抓包器
-        let mut capture = PacketCapture::new("lo", tx, filter).unwrap();
+        // 创建抓包器 - 使用 tx.clone()
+        let mut capture = PacketCapture::new("lo", tx.clone(), filter).unwrap();
 
         let stats_handler = capture.get_stats_handler();
 
         // 启动抓包任务
+        let mut rx = tx.subscribe();  // 使用原始 tx 创建订阅者
         let _ = tokio::spawn(async move {
             capture.capture_loop().await.unwrap();
-            
         });
 
         // 等待一段时间或直到收到数据包

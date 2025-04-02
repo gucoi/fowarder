@@ -1,0 +1,16 @@
+interface:
+  name: eth0
+  promiscuous: true
+  buffer_size: 65535
+  client_ip: 192.168.1.2
+
+forwarder:
+  protocol: gre
+  destination: 192.168.1.1
+  port: 4789
+  max_packet_size: 1500
+  queue_size: 1000
+
+logging:
+  level: info
+  file: /var/log/dragent.log

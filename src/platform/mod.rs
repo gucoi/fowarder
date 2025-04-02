@@ -1,4 +1,4 @@
-mod interface;
+pub mod interface;
 
 #[cfg(target_os = "linux")]
 mod linux;
