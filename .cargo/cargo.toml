@@ -1,5 +1,0 @@
-[target.x86_64-pc-windows-msvc]
-rustflags = ["-C", "link-search=native=D:/Software/NPCAP-SDK/Lib/x64"]
-
-[target.i686-pc-windows-msvc]
-rustflags = ["-C", "link-search=native=D:/Software/NPCAP-SDK/Lib/x64"]

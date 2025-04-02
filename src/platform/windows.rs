@@ -1,4 +1,10 @@
+use crate::error::ForwarderError;
+
 use super::interface::NetworkInterface;
+use std::os::windows::io::AsRawSocket;
+use windows::Win32::Networking::WinSock::*;
+use windows::Win32::NetworkManagement::IpHelper;
+use windows::core::PWSTR;
 
 pub struct WindowsInterface;
 
@@ -9,30 +15,23 @@ impl WindowsInterface {
 }
 
 impl NetworkInterface for WindowsInterface {
-    fn bind_to_interface(&self, socket: socket2::Socket, interface_name: &str) -> crate::error::Result<()> {
-       let index = self.get_interface_index(interface_name)?;
-        // 在 Windows 上，我们使用 IP_UNICAST_IF 选项来绑定接口
-        let raw_socket = socket.as_raw_socket();
+    fn bind_to_interface(&self, sock: socket2::Socket, interface_name: &str) -> crate::error::Result<()> {
+        let index = self.get_interface_index(interface_name)?;
+        let raw_socket = sock.as_raw_socket();
         unsafe {
-            use windows::Win32::Networking::WinSock::{
-                setsockopt,
-                IPPROTO_IP,
-                IP_UNICAST_IF,
-            };
             let index_net = u32::to_be(index);
             let result = setsockopt(
-                raw_socket as _,
-                IPPROTO_IP as i32,
+                SOCKET(raw_socket as usize),  // 转换为 SOCKET 类型
+                IPPROTO_IP.0,
                 IP_UNICAST_IF as i32,
-                &index_net as *const u32 as *const i8,
-                std::mem::size_of::<u32>() as i32,
+                Some(&index_net.to_ne_bytes()),  // 正确的类型转换
             );
             if result == 0 {
                 Ok(())
             } else {
-                Err(anyhow!("Failed to bind to interface"))
+                Err(ForwarderError::Interface("Failed to bind to interface".to_string()))
             }
-        } 
+        }
     }
 
     fn get_available_interface(&self) -> crate::error::Result<Vec<String>> {
@@ -41,22 +40,22 @@ impl NetworkInterface for WindowsInterface {
             let mut buf_len = 0u32;
             IpHelper::GetAdaptersAddresses(
                 0,
-                0,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
+                IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS(0),
+                None,
+                None,
                 &mut buf_len,
             );
             
             let mut buf = vec![0u8; buf_len as usize];
             let result = IpHelper::GetAdaptersAddresses(
                 0,
-                0,
-                std::ptr::null_mut(),
-                buf.as_mut_ptr() as *mut _,
+                IpHelper::GET_ADAPTERS_ADDRESSES_FLAGS(0),
+                None,
+                None,
                 &mut buf_len,
             );
             
-            if result.is_ok() {
+            if result > 0 {
                 let mut adapter = buf.as_ptr() as *const IpHelper::IP_ADAPTER_ADDRESSES_LH;
                 let mut interfaces = Vec::new();
                 
@@ -64,7 +63,7 @@ impl NetworkInterface for WindowsInterface {
                     let friendly_name = unsafe {
                         std::slice::from_raw_parts(
                             (*adapter).FriendlyName.0,
-                            (*adapter).FriendlyName.1 as usize,
+                            (*adapter).FriendlyName.len() as usize,
                         )
                     };
                     if let Ok(name) = String::from_utf16(friendly_name) {
@@ -75,7 +74,7 @@ impl NetworkInterface for WindowsInterface {
                 
                 Ok(interfaces)
             } else {
-                Err(anyhow!("Failed to get adapters addresses"))
+                Err(ForwarderError::Interface("Failed to get adapters addresses".to_string()))
             }
         }
     }
@@ -88,8 +87,7 @@ impl NetworkInterface for WindowsInterface {
             IpHelper::GetAdapterIndex(
                 PWSTR(wide_name.as_ptr() as *mut _),
                 &mut index,
-            )
-            .map_err(|e| anyhow!("Failed to get interface index: {:?}", e))?;
+            );
         }
         Ok(index)
     }

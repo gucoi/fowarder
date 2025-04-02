@@ -6,8 +6,8 @@ mod linux;
 #[cfg(target_os = "linux")]
 pub use linux::*;
 
-#[cfg(windows)]
+#[cfg(target_os = "windows")]
 mod windows;
 
-
-mod linux;
+#[cfg(target_os = "windows")]
+pub use windows::*;
