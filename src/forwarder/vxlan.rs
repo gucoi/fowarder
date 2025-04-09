@@ -5,6 +5,9 @@ use crate::{cli::ForwarderConfig,
     protocol::vxlan::VxlanPacketBuilder};
 use super::PacketForwarder;
 use libc;
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+use crate::protocol::common::{PacketStats, PacketStatsSnapshot};
+use crate::forwarder::state::ForwarderState;
 
 use std::os::windows::io::IntoRawSocket;
 use async_trait::async_trait;
@@ -15,6 +18,8 @@ use crate::platform::interface::create_interface;
 pub struct VxlanForwarder {
     socket: UdpSocket,
     packet_builder: VxlanPacketBuilder,
+    stats: Arc<PacketStats>,
+    state: Arc<AtomicU8>, // 使用原子状态替代 Mutex<ForwarderState>
 }
 
 impl VxlanForwarder {
@@ -52,6 +57,8 @@ impl VxlanForwarder {
         Ok(Self {
             socket: udp_socket,
             packet_builder: VxlanPacketBuilder::new(),
+            stats: Arc::new(PacketStats::default()),
+            state: Arc::new(AtomicU8::new(ForwarderState::Running.as_u8())), // 初始化状态为运行
         })
     }
 }
@@ -59,6 +66,31 @@ impl VxlanForwarder {
 #[async_trait]
 impl PacketForwarder for VxlanForwarder {
     async fn init(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    fn forwarder_type(&self) -> &str {
+        "vxlan"
+    }
+
+    async fn get_stats(&self) -> Result<PacketStatsSnapshot> {
+        Ok(self.stats.snapshot())
+    }
+
+    async fn get_state(&self) -> ForwarderState {
+        match self.state.load(Ordering::SeqCst) {
+            0 => ForwarderState::Paused,
+            _ => ForwarderState::Running,
+        }
+    }
+
+    async fn pause(&mut self) -> Result<()> {
+        self.state.store(ForwarderState::Paused.as_u8(), Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn resume(&mut self) -> Result<()> {
+        self.state.store(ForwarderState::Running.as_u8(), Ordering::SeqCst);
         Ok(())
     }
     

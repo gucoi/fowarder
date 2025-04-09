@@ -24,6 +24,7 @@ config = "0.13"
 socket2 = "0.5.9"
 libc = "0.2.171"
 num_cpus = "1.16" 
+parking_lot = "0.12.3"
 
 [dev-dependencies]
 tokio-test = "0.4"

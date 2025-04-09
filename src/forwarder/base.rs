@@ -1,11 +1,6 @@
 use async_trait::async_trait;
 use crate::{
-    capture::packet::PacketInfo,
-    protocol::common::PacketStats,
-    cli::ForwarderConfig,
-    error::Result,
-    forwarder::state::ForwarderState,
-    errror::ForwarderError,
+    capture::packet::PacketInfo, cli::ForwarderConfig, error::{ForwarderError, Result}, forwarder::state::ForwarderState, protocol::common::{PacketStats, PacketStatsSnapshot}
 };
 
 #[async_trait]
@@ -20,7 +15,7 @@ pub trait PacketForwarder: Send + Sync {
     async fn forward_packet(&mut self, packet: &PacketInfo, forward_config: &ForwarderConfig) -> Result<()>;
     
     /// 获取统计信息
-    async fn get_stats(&self) -> Result<PacketStats>;
+    async fn get_stats(&self) -> Result<PacketStatsSnapshot>;
 
     /// 获取当前状态
     async fn get_state(&self) -> ForwarderState;
@@ -34,13 +29,6 @@ pub trait PacketForwarder: Send + Sync {
     /// 关闭转发器
     async fn shutdown(&mut self) -> Result<()>;
     
-    /// 批量转发数据包
-    async fn forward_packet_batch(&mut self, packets: &[PacketInfo]) -> Result<()> {
-        for packet in packets {
-            self.forward_packet(packet, &self.config).await?;
-        }
-        Ok(())
-    }
     
     /// 获取建议的批处理大小
     fn suggested_batch_size(&self) -> usize {

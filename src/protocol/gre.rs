@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::net::Ipv4Addr;
 use crate::capture::{PacketCapture, PacketInfo};
-use crate::error::Result;
+use crate::error::{Result, ForwarderError};
 use super::common::{Protocol, ProtocolType, Header};
 use super::ipv4::Ipv4Header;
 

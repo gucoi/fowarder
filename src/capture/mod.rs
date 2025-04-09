@@ -11,7 +11,7 @@ pub use packet::{PacketCapture, PacketInfo};
 
 use crate::error::Result;
 use pnet::datalink::NetworkInterface;
-use tokio::sync::mpsc;
+use tokio::sync::broadcast;
 
 /// 捕获配置
 #[derive(Debug, Clone)]
@@ -60,14 +60,14 @@ impl CaptureManager {
     }
 
     /// 启动数据包捕获
-    pub async fn start_capture(&mut self) -> Result<mpsc::Receiver<PacketInfo>> {
+    pub async fn start_capture(&mut self) -> Result<broadcast::Receiver<PacketInfo>> {
         // 设置混杂模式
         if self.config.promiscuous {
             self.interface_manager.set_promiscuous(true)?;
         }
 
-        // 创建通道
-        let (tx, rx) = mpsc::channel(self.config.channel_capacity);
+        // 创建广播通道
+        let (tx, rx) = broadcast::channel(self.config.channel_capacity);
 
         // 创建数据包捕获器
         let packet_capture = PacketCapture::new(

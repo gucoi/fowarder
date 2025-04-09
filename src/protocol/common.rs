@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::convert::TryFrom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, Duration};
+use parking_lot;
 
 /// 协议类型枚举
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -101,7 +102,7 @@ impl AddressInfo {
 }
 
 /// 数据包统计 - 需要优化内存布局
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub struct PacketStats {
     total_packets: AtomicU64,
     total_bytes: AtomicU64,
@@ -114,11 +115,20 @@ pub struct PacketStats {
 }
 
 // 新增批量统计结构
-#[derive(Default)]
 struct BatchStats {
     packet_count: u32,
     byte_count: u64,
     last_update: Instant,
+}
+
+impl Default for BatchStats {
+    fn default() -> Self {
+        Self {
+            packet_count: 0,
+            byte_count: 0,
+            last_update: Instant::now(),
+        }
+    }
 }
 
 impl PacketStats {
@@ -179,6 +189,23 @@ impl PacketStats {
             *stats = BatchStats::default();
         }
     }
+
+    /// 获取当前统计数据的快照
+    pub fn snapshot(&self) -> PacketStatsSnapshot {
+        PacketStatsSnapshot {
+            bytes: self.total_bytes.load(Ordering::Relaxed),
+            packets: self.total_packets.load(Ordering::Relaxed),
+            // 其他需要的统计数据...
+        }
+    }
+}
+
+/// 统计数据快照,用于返回当前状态
+#[derive(Debug, Clone)]
+pub struct PacketStatsSnapshot {
+    pub bytes: u64,
+    pub packets: u64,
+    // 其他需要的统计数据...
 }
 
 impl TryFrom<u8> for ProtocolType {

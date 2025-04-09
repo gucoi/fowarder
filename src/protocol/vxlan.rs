@@ -2,8 +2,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::error::Result;
 use super::common::{Protocol, ProtocolType, Header};
 use crate::capture::PacketCapture;
-use crate::capture::packet::PacketInfo;
-use std::time::SystemTime;
+use crate::capture::packet::{PacketInfo, PacketHeader};
 
 /// VXLAN头部标志位
 #[derive(Debug, Clone, Copy, Default)]
@@ -113,12 +112,12 @@ impl VxlanPacketBuilder {
     }
 
     pub fn build(&mut self, packet: &PacketInfo) -> Result<Bytes> {
-        // 创建缓冲区存储完整的VXLAN数据包
         let mut buf = BytesMut::with_capacity(self.header.header_len());
 
         // 设置VNI和标志
         self.header.flags.vni_present = true;
-        self.header.vni = packet.vni.unwrap_or(0);
+        // 处理 Option<NonZeroU32> 到 u32 的转换
+        self.header.vni = packet.vni.map(|n| n.get()).unwrap_or(0);
 
         // 写入VXLAN头部
         self.header.write_to(&mut buf)?;
@@ -145,8 +144,8 @@ impl VxlanPacketBuilder {
 
 #[cfg(test)]
 mod tests {
-    use core::time;
-    use std::net::Ipv4Addr;
+    use std::{num::NonZero, sync::Arc};
+
 
     use super::*;
     
@@ -189,17 +188,9 @@ mod tests {
         let mut builder = VxlanPacketBuilder::new();
         let test_data = vec![1, 2, 3, 4];
         let packet = PacketInfo {
-            pay_load: Some(Bytes::from(test_data.clone())),
-            vni: Some(1234),
-            src_port:None,
-            dst_port:None,
-            interface_name: String::new(),
-            raw_data: Bytes::from(vec![0; 0]), // Placeholder for raw data
-            source: Ipv4Addr::new(127, 0, 0, 1),
-            destination: Ipv4Addr::new(127, 0, 0, 1),
-            protocol: ProtocolType::Vxlan,
-            timestamp: SystemTime::now(),
-            length: 0,
+            payload: Arc::new(Bytes::from(test_data.clone())),
+            vni: NonZero::new(1234),
+            header: PacketHeader::default(),
         };
 
         let result = builder.build(&packet).unwrap();

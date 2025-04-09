@@ -7,6 +7,7 @@ pub mod gre;
 pub mod socket;
 pub mod vxlan;
 pub mod zmq;
+pub mod state;
 
 pub use base::PacketForwarder;
 pub use gre::GreForwarder;

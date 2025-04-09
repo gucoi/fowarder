@@ -1,12 +1,12 @@
 use crate::{
     error::{Result, ForwarderError},
     forwarder::base::PacketForwarder,
-    protocol::common::PacketStats,
+    protocol::common::{PacketStats, PacketStatsSnapshot},
     capture::packet::PacketInfo,
     cli::ForwarderConfig,
     forwarder::state::ForwarderState,
 };
-use bytes::Bytes;
+
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use zmq::Socket;
@@ -42,7 +42,7 @@ impl ZmqForwarder {
         Ok(Self {
             socket: Arc::new(Mutex::new(socket)),
             stats: Arc::new(PacketStats::default()),
-            state: Arc::new(AtomicU8::new(ForwarderState::Running as u8)),
+            state: Arc::new(AtomicU8::new(ForwarderState::Running.as_u8())),
             batch_size: 10,  // 默认批处理大小
             batch_timeout: Duration::from_secs(1),  // 默认批处理超时
             destination,
@@ -63,10 +63,9 @@ impl ZmqForwarder {
         
         // 使用 zmq 的多部分消息特性
         for packet in packets {
-            if let Some(payload) = &packet.payload {
-                socket.send_multipart(payload.as_ref(), zmq::SNDMORE)?;
-                total_bytes += payload.len();
-            }
+            let msg = zmq::Message::from(packet.payload.as_ref().to_vec());
+            socket.send_multipart(vec![msg], zmq::SNDMORE)?;
+            total_bytes += packet.payload.len();
         }
         
         self.stats.add_bytes(total_bytes as u64);
@@ -94,6 +93,10 @@ impl PacketForwarder for ZmqForwarder {
         "zmq"
     }
 
+    async fn get_stats(&self) -> Result<PacketStatsSnapshot> {
+        Ok(self.stats.snapshot())
+    }
+
     async fn get_state(&self) -> ForwarderState {
         match self.state.load(Ordering::SeqCst) {
             0 => ForwarderState::Paused,
@@ -102,12 +105,12 @@ impl PacketForwarder for ZmqForwarder {
     }
 
     async fn pause(&mut self) -> Result<()> {
-        self.state.store(ForwarderState::Paused as u8, Ordering::SeqCst);
+        self.state.store(ForwarderState::Paused.as_u8(), Ordering::SeqCst);
         Ok(())
     }
 
     async fn resume(&mut self) -> Result<()> {
-        self.state.store(ForwarderState::Running as u8, Ordering::SeqCst);
+        self.state.store(ForwarderState::Running.as_u8(), Ordering::SeqCst);
         Ok(())
     }
 
@@ -117,34 +120,30 @@ impl PacketForwarder for ZmqForwarder {
 
     async fn forward_packet(&mut self, packet: &PacketInfo, _forward_config: &ForwarderConfig) -> Result<()> {
         let socket = self.socket.lock().await;
+        let bytes_len = packet.payload.len();
         
-        // 获取payload数据
-        let payload = packet.pay_load.as_ref().ok_or_else(|| 
-            ForwarderError::Protocol("No payload data available".to_string()))?;
-            
-        // 记录长度用于统计
-        let bytes_len = payload.len();
-            
-        // 发送数据包
-        socket.send(payload.as_ref(), 0)
+        // 创建 ZMQ 消息并发送
+        let msg = zmq::Message::from(packet.payload.as_ref().to_vec());
+        socket.send(msg, 0)
             .map_err(|e| ForwarderError::Network(format!("Failed to send packet: {}", e)))?;
             
-        // 更新统计信息
         self.update_stats(bytes_len).await;
-        
-        Ok(())  // 返回 () 而不是字节数
+        Ok(())
     }
 
     async fn shutdown(&mut self) -> Result<()> {
         // ZMQ socket会在drop时自动关闭
         Ok(())
     }
+
+    
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn test_zmq_forwarder() {
@@ -163,7 +162,7 @@ mod tests {
         ).unwrap();
 
         let packet = PacketInfo {
-            pay_load: Some(Bytes::from(vec![1, 2, 3, 4])),
+            payload: Arc::new(Bytes::from(vec![1, 2, 3, 4])),
             ..Default::default()
         };
 

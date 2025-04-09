@@ -1,5 +1,6 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::os::windows::io::{IntoRawSocket, FromRawSocket};
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use crate::protocol::gre::GrePacketBuilder;
@@ -8,10 +9,14 @@ use crate::capture::packet::PacketInfo;
 use crate::cli::ForwarderConfig;
 use crate::error::{ForwarderError, Result};
 use crate::platform::interface::create_interface;
+use crate::forwarder::state::ForwarderState;
+use crate::protocol::common::{PacketStats, PacketStatsSnapshot};
 
 pub struct GreForwarder {
     socket: UdpSocket,
     packet_builder: GrePacketBuilder,
+    stats: Arc<PacketStats>,
+    state: Arc<AtomicU8>, 
 }
 
 impl GreForwarder {
@@ -52,12 +57,40 @@ impl GreForwarder {
         Ok(Self {
             socket: udp_socket,
             packet_builder: GrePacketBuilder::new(),
+            stats: Arc::new(PacketStats::default()),
+            state: Arc::new(AtomicU8::new(ForwarderState::Running.as_u8())),
         })
     }
 }
 
 #[async_trait]
 impl PacketForwarder for GreForwarder {
+    
+    async fn resume(&mut self) -> Result<()> {
+        self.state.store(ForwarderState::Running.as_u8(), Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn forwarder_type(&self) -> &str {
+        "GRE"
+    }
+
+    async fn get_stats(&self) -> Result<PacketStatsSnapshot> {
+        Ok(self.stats.snapshot())
+    }
+
+    async fn get_state(&self) -> ForwarderState {
+        match self.state.load(Ordering::SeqCst) {
+            0 => ForwarderState::Paused,
+            _ => ForwarderState::Running,
+        }
+    }
+
+    async fn pause(&mut self) -> Result<()> {
+        self.state.store(ForwarderState::Paused.as_u8(), Ordering::SeqCst);
+        Ok(())
+    }
+
     async fn init(&mut self) -> Result<()> {
         // 建立GRE隧道
         Ok(())
