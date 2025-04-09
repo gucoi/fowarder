@@ -1,5 +1,4 @@
-use std::{net::{IpAddr, Ipv4Addr, SocketAddr}, os::windows::io::FromRawSocket};
-use socket2::{Domain, Protocol, Socket, Type};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use crate::{cli::ForwarderConfig, 
     error::Result, error::ForwarderError, 
     protocol::vxlan::VxlanPacketBuilder};
@@ -9,11 +8,16 @@ use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
 use crate::protocol::common::{PacketStats, PacketStatsSnapshot};
 use crate::forwarder::state::ForwarderState;
 
-use std::os::windows::io::IntoRawSocket;
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
 use crate::capture::packet::PacketInfo;
 use crate::platform::interface::create_interface;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::io::{IntoRawSocket, FromRawSocket};
+
+#[cfg(not(target_os = "windows"))]
+use std::os::unix::io::{IntoRawFd, FromRawFd};
 
 pub struct VxlanForwarder {
     socket: UdpSocket,
@@ -48,8 +52,15 @@ impl VxlanForwarder {
             ForwarderError::Interface(format!("Failed to set non-blocking mode: {}", e))
         })?;
 
+        #[cfg(target_os = "windows")]
         // 转换为tokio的UDP socket
         let std_socket = unsafe { std::net::UdpSocket::from_raw_socket(socket.into_raw_socket()) };
+
+        #[cfg(not(target_os = "windows"))]
+        let std_socket = {
+            let raw_fd = socket.into_raw_fd();
+            unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) }
+        };
         
         let udp_socket = UdpSocket::from_std(std_socket)
             .map_err(|e| ForwarderError::Interface(format!("Failed to convert to tokio UdpSocket: {}", e)))?;

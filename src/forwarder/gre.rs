@@ -1,5 +1,5 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::os::windows::io::{IntoRawSocket, FromRawSocket};
+use std::os::fd::AsFd;
 use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
@@ -11,6 +11,11 @@ use crate::error::{ForwarderError, Result};
 use crate::platform::interface::create_interface;
 use crate::forwarder::state::ForwarderState;
 use crate::protocol::common::{PacketStats, PacketStatsSnapshot};
+
+#[cfg(target_os = "windows")]
+use std::os::windows::io::{IntoRawSocket, FromRawSocket};
+#[cfg(not(target_os = "windows"))]
+use std::os::unix::io::{IntoRawFd, FromRawFd};
 
 pub struct GreForwarder {
     socket: UdpSocket,
@@ -45,9 +50,18 @@ impl GreForwarder {
             ForwarderError::Interface(format!("Failed to set non-blocking mode: {}", e))
         })?;
 
-        // 转换为原始socket，然后构建标准库的UDP socket
-        let raw_socket = socket.into_raw_socket();
-        let std_socket = unsafe { std::net::UdpSocket::from_raw_socket(raw_socket) };
+        // 转换为标准库的UDP socket，处理不同平台
+        #[cfg(target_os = "windows")]
+        let std_socket = {
+            let raw_socket = socket.into_raw_socket();
+            unsafe { std::net::UdpSocket::from_raw_socket(raw_socket) }
+        };
+
+        #[cfg(not(target_os = "windows"))]
+        let std_socket = {
+            let raw_fd = socket.into_raw_fd();
+            unsafe { std::net::UdpSocket::from_raw_fd(raw_fd) }
+        };
         
         // 转换为tokio的UDP socket
         let udp_socket = UdpSocket::from_std(std_socket).map_err(|e| {

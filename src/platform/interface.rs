@@ -1,7 +1,12 @@
 use socket2::Socket;
 
 use crate::error::Result;
+
+#[cfg(target_os = "windows")]
 use crate::platform::windows::WindowsInterface;
+
+#[cfg(target_os = "linux")]
+use crate::platform::linux::LinuxInterface;
 
 pub trait NetworkInterface: Send + Sync {
     fn bind_to_interface(&self, sock: &Socket, interface_name: &str) -> Result<()>;
