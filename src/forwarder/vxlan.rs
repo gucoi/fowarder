@@ -117,6 +117,8 @@ impl PacketForwarder for VxlanForwarder {
 
 #[cfg(test)]
 mod tests {
+    use std::num::NonZero;
+
     use super::*;
     use bytes::Bytes;
 
@@ -134,8 +136,8 @@ mod tests {
         let mut forwarder = VxlanForwarder::new(&config).await.unwrap();
         
         let packet = PacketInfo {
-            pay_load: Some(Bytes::from(vec![1, 2, 3, 4])),
-            vni: Some(1000),
+            payload: Arc::new(Bytes::from(vec![1, 2, 3, 4])),
+            vni: NonZero::new(0),
             ..Default::default()
         };
         
