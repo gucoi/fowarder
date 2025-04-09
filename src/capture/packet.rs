@@ -151,14 +151,13 @@ impl PacketCapture {
 
     pub async fn capture_loop(&mut self) -> Result<()> {
         let stats = &self.stats;
-        let interface_name = &self.interface_name;
 
         loop {
             match self.cap.next_packet() {
                 Ok(packet) => {
                     stats.packets_received.fetch_add(1, Ordering::Relaxed);
                     // 移除生命周期标注
-                    if let Some(packet_info) = Self::process_packet(&packet, interface_name) {
+                    if let Some(packet_info) = Self::process_packet(&packet) {
                         if let Err(e) = self.tx.send(packet_info) {
                             log::error!("Failed to broadcast packet: {}", e);
                             break;
@@ -190,7 +189,7 @@ impl PacketCapture {
     /// 启动抓包循环
     /// 处理捕获的数据包
     // 简化函数签名，移除生命周期参数
-    fn process_packet(packet: &pcap::Packet, interface_name: &str) -> Option<PacketInfo> {
+    fn process_packet(packet: &pcap::Packet) -> Option<PacketInfo> {
         let ethernet = EthernetPacket::new(packet.data)?;
 
         // 使用 zero-copy 方式处理 payload
