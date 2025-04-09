@@ -1,4 +1,12 @@
-FROM rust:1.70 as builder
+FROM mcr.microsoft.com/devcontainers/rust:latest
+
+# Install libpcap and other dependencies
+RUN apt-get update && \
+    apt-get install -y \
+    libpcap-dev \
+    pkg-config && \
+    rm -rf /var/lib/apt/lists/*
+
 WORKDIR /usr/src/dragent
 COPY . .
 RUN cargo build --release
