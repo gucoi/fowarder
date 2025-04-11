@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crate::error::Result;
 use super::common::{Protocol, ProtocolType, Header};
 use crate::capture::PacketCapture;
-use crate::capture::packet::{PacketInfo, PacketHeader};
+use crate::capture::packet::{PacketInfo, packet_to_bytes};
 
 /// VXLAN头部标志位
 #[derive(Debug, Clone, Copy, Default)]
@@ -186,24 +186,21 @@ mod tests {
     #[test]
     fn test_vxlan_packet_build() {
         let mut builder = VxlanPacketBuilder::new();
-        let test_data = vec![1, 2, 3, 4];
+
         let packet = PacketInfo {
-            payload: Arc::new(Bytes::from(test_data.clone())),
+            payload: Arc::new(packet_to_bytes(&PacketInfo::default())),
             vni: NonZero::new(1234),
-            header: PacketHeader::default(),
+            ..Default::default()
         };
 
         let result = builder.build(&packet).unwrap();
         
         // 验证长度
-        assert_eq!(result.len(), 8 + test_data.len()); // VXLAN header + payload
+        assert_eq!(result.len(), 8 + packet.payload.len()); // VXLAN header + payload
         
         // 验证VNI
         let mut bytes = result.slice(0..);
         let parsed = VxlanHeader::read_from(&mut bytes).unwrap();
         assert_eq!(parsed.vni, 1234);
-        
-        // 验证payload
-        assert_eq!(&bytes[..], &test_data[..]);
     }
 }

@@ -288,7 +288,7 @@ impl GrePacketBuilder {
         }
 
         // 添加错误处理
-        if buf.len() > packet.header.length as usize {
+        if buf.len() - 4 > packet.header.length as usize {
             return Err(ForwarderError::PacketTooLarge {
                 size: buf.len(),
                 max: packet.header.length as usize,

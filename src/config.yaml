@@ -3,12 +3,15 @@ interface:
   name: "eth0"
   promiscuous: true
   buffer_size: 65535
+  client_ip: "127.0.0.1"
 
 forwarder:
   protocol: "gre"
   destination: "192.168.1.100"
-  port: "9066"
+  port: 9066
   max_packet_size: 65535
   queue_size: 1000
 
-log_level: "info"
+log_level:
+  level: "info"
+  file: "/var/log/gre_forwarder.log"

@@ -10,7 +10,7 @@ use crate::forwarder::state::ForwarderState;
 
 use async_trait::async_trait;
 use tokio::net::UdpSocket;
-use crate::capture::packet::PacketInfo;
+use crate::capture::packet::{PacketInfo, packet_to_bytes};
 use crate::platform::interface::create_interface;
 
 #[cfg(target_os = "windows")]
@@ -130,31 +130,6 @@ impl PacketForwarder for VxlanForwarder {
 mod tests {
     use std::num::NonZero;
     use super::*;
-    use bytes::{BytesMut, BufMut, Bytes};
-
-    fn packet_to_bytes(packet: &PacketInfo) -> Bytes {
-        let mut buffer = BytesMut::with_capacity(1500); // 使用常见的MTU大小
-        
-        // 添加基本的以太网头部（14字节）
-        buffer.put_slice(&[0xFF; 6]); // 目标MAC
-        buffer.put_slice(&[0xAA; 6]); // 源MAC
-        buffer.put_u16(0x0800);       // IPv4类型
-
-        // 添加一些示例IP包数据
-        buffer.put_slice(&[0x45, 0x00]); // IPv4 version & header length
-        buffer.put_slice(&[0x00, 0x20]); // Total length
-        buffer.put_slice(&[0x00, 0x00]); // Identification
-        buffer.put_slice(&[0x40, 0x00]); // Flags & fragment offset
-        buffer.put_u8(64);               // TTL
-        buffer.put_u8(17);               // Protocol (UDP)
-        buffer.put_u16(0x0000);          // Checksum
-
-        // 源IP和目标IP
-        buffer.put_slice(&[192, 168, 1, 1]);
-        buffer.put_slice(&[192, 168, 1, 2]);
-
-        buffer.freeze()
-    }
 
     #[tokio::test]
     async fn test_vxlan_forwarder() {

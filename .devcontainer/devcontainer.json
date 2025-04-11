@@ -18,6 +18,11 @@
             "profile": "default"
         }
     },
-    "remoteUser": "vscode",
+    "runArgs": [
+        "--cap-add=NET_ADMIN",
+        "--cap-add=NET_RAW",
+        "--network=host"
+    ],
+    "remoteUser": "root",
     "postCreateCommand": "rustc --version && cargo --version"
 }

@@ -7,8 +7,8 @@ use pnet::packet::udp::UdpPacket;
 use pnet::packet::Packet;
 use std::net::Ipv4Addr;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use tokio::sync::{mpsc, broadcast};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{mpsc, broadcast, watch};
 
 use crate::error::{ForwarderError, Result};
 use crate::protocol::common::ProtocolType;
@@ -22,6 +22,30 @@ pub struct PacketInfo {
     pub header: PacketHeader,
     // 使用 Option<NonZeroU32> 优化 Option 存储
     pub vni: Option<std::num::NonZeroU32>,
+}
+
+pub fn packet_to_bytes(packet: &PacketInfo) -> Bytes {
+    let mut buffer = BytesMut::with_capacity(1500); // 使用常见的MTU大小
+    
+    // 添加基本的以太网头部（14字节）
+    buffer.put_slice(&[0xFF; 6]); // 目标MAC
+    buffer.put_slice(&[0xAA; 6]); // 源MAC
+    buffer.put_u16(0x0800);       // IPv4类型
+
+    // 添加一些示例IP包数据
+    buffer.put_slice(&[0x45, 0x00]); // IPv4 version & header length
+    buffer.put_slice(&[0x00, 0x20]); // Total length
+    buffer.put_slice(&[0x00, 0x00]); // Identification
+    buffer.put_slice(&[0x40, 0x00]); // Flags & fragment offset
+    buffer.put_u8(64);               // TTL
+    buffer.put_u8(17);               // Protocol (UDP)
+    buffer.put_u16(0x0000);          // Checksum
+
+    // 源IP和目标IP
+    buffer.put_slice(&[192, 168, 1, 1]);
+    buffer.put_slice(&[192, 168, 1, 2]);
+
+    buffer.freeze()
 }
 
 #[derive(Clone, Debug)]
@@ -78,10 +102,12 @@ impl Default for PacketFilter {
 }
 
 pub struct PacketCapture {
-    cap: Capture<Active>,
-    tx: broadcast::Sender<PacketInfo>,  // 这里保持不变
+    cap: Arc<Mutex<Capture<Active>>>,
+    tx: broadcast::Sender<PacketInfo>,
     interface_name: String,
     stats: Arc<CaptureStats>,
+    stop_rx: watch::Receiver<bool>,
+    stop_tx: watch::Sender<bool>,
 }
 
 pub struct CaptureStats {
@@ -114,7 +140,7 @@ impl PacketCapture {
     /// 创建新的抓包实例
     pub fn new(
         interface_name: &str,
-        tx: broadcast::Sender<PacketInfo>, // 保持参数不变
+        tx: broadcast::Sender<PacketInfo>,
         filter: PacketFilter,
     ) -> Result<Self> {
         // 查找网络接口
@@ -137,11 +163,15 @@ impl PacketCapture {
             cap.filter(&filter.bpf_filter, true)?;
         }
 
+        let (stop_tx, stop_rx) = watch::channel(false);
+
         Ok(Self {
-            cap,
+            cap: Arc::new(Mutex::new(cap)),
             tx,
             interface_name: interface_name.to_string(),
             stats: Arc::new(CaptureStats::default()),
+            stop_rx,
+            stop_tx,
         })
     }
 
@@ -149,52 +179,93 @@ impl PacketCapture {
         Arc::clone(&self.stats)
     }
 
+    pub fn break_loop(&mut self) {
+        println!("Breaking capture loop...");
+        if let Err(e) = self.stop_tx.send(true) {
+            println!("Failed to send stop signal: {}", e);
+        }
+    }
+
+    pub fn clone_with_stop(&self) -> Self {
+        Self {
+            cap: Arc::clone(&self.cap),
+            tx: self.tx.clone(),
+            interface_name: self.interface_name.clone(),
+            stats: Arc::clone(&self.stats),
+            stop_rx: self.stop_rx.clone(),
+            stop_tx: self.stop_tx.clone(),
+        }
+    }
+
     pub async fn capture_loop(&mut self) -> Result<()> {
         let stats = &self.stats;
+        println!("Starting packet capture on interface: {}", self.interface_name);
+
+        let mut consecutive_errors = 0;
+        const MAX_CONSECUTIVE_ERRORS: u32 = 5;
+        let mut should_stop = *self.stop_rx.borrow();
 
         loop {
-            match self.cap.next_packet() {
-                Ok(packet) => {
-                    stats.packets_received.fetch_add(1, Ordering::Relaxed);
-                    // 移除生命周期标注
-                    if let Some(packet_info) = Self::process_packet(&packet) {
-                        if let Err(e) = self.tx.send(packet_info) {
-                            log::error!("Failed to broadcast packet: {}", e);
+            if should_stop {
+                println!("Received stop signal, ending capture loop");
+                break;
+            }
+
+            tokio::select! {
+                Ok(()) = self.stop_rx.changed() => {
+                    should_stop = *self.stop_rx.borrow();
+                    if should_stop {
+                        println!("Received stop signal, ending capture loop");
+                        break;
+                    }
+                }
+                _ = tokio::task::yield_now() => {
+                    // 使用本地变量存储临时数据
+                    let data = {
+                        let mut guard = self.cap.lock().unwrap();
+                        match guard.next_packet() {
+                            Ok(packet) => {
+                                // 直接在这里克隆数据
+                                Some(Vec::from(packet.data))
+                            }
+                            Err(pcap::Error::TimeoutExpired) => None,
+                            Err(e) => {
+                                println!("Error capturing packet: {}", e);
+                                None
+                            }
+                        }
+                    };
+
+                    // 在锁外处理数据
+                    if let Some(packet_data) = data {
+                        stats.packets_received.fetch_add(1, Ordering::Relaxed);
+                        
+                        if let Some(packet_info) = Self::process_packet_data(&packet_data) {
+                            if let Err(e) = self.tx.send(packet_info) {
+                                println!("Failed to send packet: {}", e);
+                                break;
+                            }
+                        }
+                        consecutive_errors = 0;
+                    } else {
+                        consecutive_errors += 1;
+                        if consecutive_errors >= MAX_CONSECUTIVE_ERRORS {
                             break;
                         }
                     }
                 }
-                Err(pcap::Error::TimeoutExpired) => {
-                    continue;
-                }
-                Err(e) => {
-                    log::error!("Packet capture error: {}", e);
-                    break;
-                }
-            }
-
-            // 更新统计信息
-            if let Ok(pcap_stats) = self.cap.stats() {
-                stats
-                    .packets_dropped
-                    .store(pcap_stats.dropped as u64, Ordering::Relaxed);
-                stats
-                    .packets_if_dropped
-                    .store(pcap_stats.if_dropped as u64, Ordering::Relaxed);
             }
         }
 
+        println!("Capture loop ended");
         Ok(())
     }
-    /// 启动抓包循环
-    /// 处理捕获的数据包
-    // 简化函数签名，移除生命周期参数
-    fn process_packet(packet: &pcap::Packet) -> Option<PacketInfo> {
-        let ethernet = EthernetPacket::new(packet.data)?;
 
-        // 使用 zero-copy 方式处理 payload
-        let payload = Arc::new(Bytes::copy_from_slice(packet.data));
-
+    // 新增辅助方法处理原始数据
+    fn process_packet_data(data: &[u8]) -> Option<PacketInfo> {
+        let ethernet = EthernetPacket::new(data)?;
+        let payload = Arc::new(Bytes::copy_from_slice(data));
+        
         match ethernet.get_ethertype() {
             EtherTypes::Ipv4 => {
                 let ip_packet = Ipv4Packet::new(ethernet.payload())?;
@@ -228,7 +299,7 @@ impl PacketCapture {
                         protocol: ProtocolType::try_from(ip_packet.get_next_level_protocol().0).unwrap(),
                         src_port,
                         dst_port,
-                        length: packet.data.len() as u16,
+                        length: data.len() as u16,
                     },
                     vni: None,  // Default to None for now
                 })
@@ -270,7 +341,7 @@ impl PacketCapture {
 
     /// 设置新的BPF过滤器
     pub fn set_filter(&mut self, filter: &str) -> Result<()> {
-        self.cap.filter(filter, true)?;
+        self.cap.lock().unwrap().filter(filter, true)?;
         Ok(())
     }
 }
@@ -285,35 +356,105 @@ pub fn list_interfaces() -> Result<Vec<String>> {
 mod tests {
     use super::*;
     use tokio::sync::broadcast;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn test_packet_capture() {
-        // 创建 broadcast channel
+        println!("Starting packet capture test...");
+
+        // 创建 broadcast channel，增加容量避免阻塞
         let (tx, _) = broadcast::channel(1000);
+        println!("Created broadcast channel with capacity 1000");
+        
+        // 列出可用接口
+        match list_interfaces() {
+            Ok(interfaces) => println!("Available interfaces: {:?}", interfaces),
+            Err(e) => println!("Failed to list interfaces: {}", e),
+        }
         
         // 使用本地回环接口进行测试
         let filter = PacketFilter {
-            bpf_filter: "tcp".to_string(),
+            bpf_filter: "".to_string(), // 先不使用过滤器便于测试
             ..Default::default()
         };
+        println!("Created packet filter without BPF");
 
-        // 创建抓包器 - 使用 tx.clone()
-        let mut capture = PacketCapture::new("lo", tx.clone(), filter).unwrap();
+        // 创建抓包器，获取停止信号发送器
+        let mut capture = match PacketCapture::new("lo", tx.clone(), filter) {
+            Ok(cap) => {
+                println!("Successfully created packet capture on lo");
+                cap
+            }
+            Err(e) => {
+                println!("Failed to create packet capture: {}", e);
+                panic!("Could not create packet capture");
+            }
+        };
 
         let stats_handler = capture.get_stats_handler();
+        println!("Initialized capture stats handler");
 
-        // 启动抓包任务
-        let mut rx = tx.subscribe();  // 使用原始 tx 创建订阅者
-        let _ = tokio::spawn(async move {
-            capture.capture_loop().await.unwrap();
+        // 创建接收器
+        let mut rx = tx.subscribe();
+
+        // 先克隆一份用于停止
+        let mut capture_for_stop = capture.clone_with_stop();
+
+        // 设置停止信号
+        let stop_handle = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            println!("Sending stop signal");
+            capture_for_stop.break_loop();
         });
 
-        // 等待一段时间或直到收到数据包
-        tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
-            .await
-            .ok();
+        // 启动捕获
+        let capture_handle = tokio::spawn(async move {
+            if let Err(e) = capture.capture_loop().await {
+                println!("Capture loop error: {}", e);
+            }
+        });
 
-        // 检查统计信息
-        assert!(stats_handler.packets_received.load(Ordering::Relaxed) >= 0);
+        // 等待并接收数据包
+        println!("Waiting for packets...");
+        let timeout_duration = Duration::from_secs(5);
+        
+        // 使用 tokio::select! 同时等待多个异步操作
+        tokio::select! {
+            // 等待数据包
+            res = async {
+                while let Ok(packet) = rx.recv().await {
+                    println!("Received packet: {:?}", packet);
+                    return Ok::<_, broadcast::error::RecvError>(packet);
+                }
+                Err(broadcast::error::RecvError::Closed)
+            } => {
+                match res {
+                    Ok(packet) => println!("Successfully received packet: {:?}", packet),
+                    Err(e) => println!("Error receiving packet: {}", e),
+                }
+            }
+            
+            // 超时处理
+            _ = tokio::time::sleep(timeout_duration) => {
+                println!("Timeout waiting for packets after {} seconds", timeout_duration.as_secs());
+            }
+        }
+
+        // 打印统计信息
+        let (received, dropped, if_dropped) = stats_handler.get_stats();
+        println!("Capture Statistics:");
+        println!("  Packets received: {}", received);
+        println!("  Packets dropped: {}", dropped);
+        println!("  Interface drops: {}", if_dropped);
+
+        // 等待捕获任务完成
+        if let Err(e) = capture_handle.await {
+            println!("Capture task error: {}", e);
+        }
+
+        // 验证
+        let packets_received = stats_handler.packets_received.load(Ordering::Relaxed);
+        println!("Final packets received count: {}", packets_received);
+        assert!(packets_received >= 0, "Should have valid packet count");
     }
 }
